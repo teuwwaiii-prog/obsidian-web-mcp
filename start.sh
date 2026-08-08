@@ -1,7 +1,13 @@
 #!/bin/bash
 set +e
 
-export PATH="/mise/shims:/root/.local/bin:/root/.cargo/bin:$PATH"
+export PATH="/root/.local/bin:$PATH"
+
+if ! command -v uv >/dev/null 2>&1; then
+  echo "Installing uv..."
+  curl -LsSf https://astral.sh/uv/install.sh | sh
+  export PATH="/root/.local/bin:$PATH"
+fi
 
 REPO_URL="https://${GITHUB_TOKEN}@github.com/teuwwaiii-prog/${GITHUB_REPO_NAME}.git"
 
@@ -26,27 +32,9 @@ sync_loop() {
 }
 sync_loop &
 
-echo "--- DEBUG: environment ---"
-echo "PATH=$PATH"
-echo "whoami: $(whoami)"
-echo "--- ls /app ---"
-ls -la /app 2>&1
-echo "--- searching for uv and vault-mcp binaries ---"
-find / -xdev \( -iname "uv" -o -iname "vault-mcp" \) 2>/dev/null
-echo "--- END DEBUG ---"
-
 cd /app
+echo "Installing project dependencies..."
+uv sync
 
-if command -v uv >/dev/null 2>&1; then
-  echo "Using: uv run vault-mcp"
-  exec uv run vault-mcp
-elif [ -x /app/.venv/bin/vault-mcp ]; then
-  echo "Using: /app/.venv/bin/vault-mcp"
-  exec /app/.venv/bin/vault-mcp
-elif [ -x /app/venv/bin/vault-mcp ]; then
-  echo "Using: /app/venv/bin/vault-mcp"
-  exec /app/venv/bin/vault-mcp
-else
-  echo "vault-mcp introuvable — voir DEBUG ci-dessus. Conteneur maintenu en vie."
-  sleep 3600
-fi
+echo "Starting vault-mcp..."
+exec uv run vault-mcp
