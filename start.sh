@@ -1,5 +1,5 @@
 #!/bin/bash
-set -e
+set +e
 
 export PATH="/mise/shims:/root/.local/bin:/root/.cargo/bin:$PATH"
 
@@ -10,26 +10,29 @@ if [ ! -d "$VAULT_PATH/.git" ]; then
   git clone "$REPO_URL" "$VAULT_PATH"
 fi
 
-cd "$VAULT_PATH"
+cd "$VAULT_PATH" || exit 1
 git config user.email "railway@sync"
 git config user.name "Railway Sync"
 
 sync_loop() {
   while true; do
     sleep 300
-    cd "$VAULT_PATH"
+    cd "$VAULT_PATH" || continue
     git add -A
     git diff --cached --quiet || git commit -m "Railway auto-sync $(date -u +%Y-%m-%dT%H:%M:%SZ)"
-    git pull --rebase origin main || true
-    git push origin main || true
+    git pull --rebase origin main
+    git push origin main
   done
 }
 sync_loop &
 
-echo "--- DEBUG: locating uv / vault-mcp ---"
+echo "--- DEBUG: environment ---"
 echo "PATH=$PATH"
-which uv 2>/dev/null || echo "uv not in PATH"
-find / -maxdepth 4 \( -iname "vault-mcp" -o -iname "uv" \) 2>/dev/null | grep -v -e /proc -e "$VAULT_PATH"
+echo "whoami: $(whoami)"
+echo "--- ls /app ---"
+ls -la /app 2>&1
+echo "--- searching for uv and vault-mcp binaries ---"
+find / -xdev \( -iname "uv" -o -iname "vault-mcp" \) 2>/dev/null
 echo "--- END DEBUG ---"
 
 cd /app
@@ -44,6 +47,6 @@ elif [ -x /app/venv/bin/vault-mcp ]; then
   echo "Using: /app/venv/bin/vault-mcp"
   exec /app/venv/bin/vault-mcp
 else
-  echo "vault-mcp introuvable — voir le DEBUG ci-dessus. Conteneur maintenu en vie pour lecture des logs."
+  echo "vault-mcp introuvable — voir DEBUG ci-dessus. Conteneur maintenu en vie."
   sleep 3600
 fi
