@@ -1,6 +1,8 @@
 #!/bin/bash
 set -e
 
+export PATH="/mise/shims:/root/.local/bin:/root/.cargo/bin:$PATH"
+
 REPO_URL="https://${GITHUB_TOKEN}@github.com/teuwwaiii-prog/${GITHUB_REPO_NAME}.git"
 
 if [ ! -d "$VAULT_PATH/.git" ]; then
