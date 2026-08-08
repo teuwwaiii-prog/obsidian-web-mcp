@@ -1,4 +1,5 @@
 #!/bin/bash
+# rebuild trigger
 set +e
 
 export PATH="/root/.local/bin:$PATH"
