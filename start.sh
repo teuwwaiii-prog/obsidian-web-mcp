@@ -26,4 +26,24 @@ sync_loop() {
 }
 sync_loop &
 
-exec uv run vault-mcp
+echo "--- DEBUG: locating uv / vault-mcp ---"
+echo "PATH=$PATH"
+which uv 2>/dev/null || echo "uv not in PATH"
+find / -maxdepth 4 \( -iname "vault-mcp" -o -iname "uv" \) 2>/dev/null | grep -v -e /proc -e "$VAULT_PATH"
+echo "--- END DEBUG ---"
+
+cd /app
+
+if command -v uv >/dev/null 2>&1; then
+  echo "Using: uv run vault-mcp"
+  exec uv run vault-mcp
+elif [ -x /app/.venv/bin/vault-mcp ]; then
+  echo "Using: /app/.venv/bin/vault-mcp"
+  exec /app/.venv/bin/vault-mcp
+elif [ -x /app/venv/bin/vault-mcp ]; then
+  echo "Using: /app/venv/bin/vault-mcp"
+  exec /app/venv/bin/vault-mcp
+else
+  echo "vault-mcp introuvable — voir le DEBUG ci-dessus. Conteneur maintenu en vie pour lecture des logs."
+  sleep 3600
+fi
