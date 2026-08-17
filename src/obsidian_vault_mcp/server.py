@@ -665,6 +665,26 @@ def build_app(extensions=()):
 
     app.routes.insert(0, Route("/health", health, methods=["GET"]))
 
+    # GitHub push webhook (bearer-exempt, see auth._AUTH_EXEMPT_PATHS; authenticated by
+    # HMAC signature inside the handler). Mounted UNCONDITIONALLY, even with no
+    # WEBHOOK_SECRET set -- the path is auth-exempt either way, so leaving it unrouted
+    # would let an unauthenticated request fall through to the MCP transport mounted at
+    # "/". Unconfigured, the handler answers 503 and never touches git.
+    #
+    # Every method is routed for the same reason: a POST-only route yields a PARTIAL
+    # match on GET, which Starlette skips in favour of the FULL match from the transport
+    # Mount. The handler rejects non-POST with 405 itself.
+    from .webhook import WEBHOOK_PATH, github_webhook
+
+    app.routes.insert(
+        0,
+        Route(
+            WEBHOOK_PATH,
+            github_webhook,
+            methods=["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+        ),
+    )
+
     # Extension routes (e.g. a localhost search endpoint), added before the auth
     # middleware so they are bearer-protected like the MCP transport.
     #

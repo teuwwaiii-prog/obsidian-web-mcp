@@ -11,9 +11,16 @@ from . import config
 from .config import VAULT_MCP_TOKEN
 from .context import reset_request_context, set_request_context
 
-# Paths that don't require bearer auth (OAuth flow + health)
+# Paths that don't require bearer auth (OAuth flow + health + the GitHub webhook).
+#
+# /webhooks/github is exempt because GitHub cannot send a bearer token; it authenticates
+# instead with an HMAC-SHA256 signature over the raw body, verified inside the handler
+# (webhook.github_webhook), and fails closed when WEBHOOK_SECRET is unset. server.build_app
+# ALWAYS mounts that route -- an exempt path with no route behind it would fall through to
+# the MCP transport mounted at "/" and hand it an unauthenticated request.
 _AUTH_EXEMPT_PATHS = {
     "/health",
+    "/webhooks/github",
     "/.well-known/oauth-authorization-server",
     "/.well-known/oauth-protected-resource",
     "/oauth/authorize",
