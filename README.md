@@ -122,7 +122,7 @@ All configuration is via environment variables:
 | `VAULT_OAUTH_USERNAME` | No | `obsidian` | Username for the interactive login |
 | `VAULT_MCP_HOST` | No | `127.0.0.1` | Bind address. Loopback by default; set `0.0.0.0` only for deliberate LAN exposure |
 | `VAULT_MCP_PORT` | No | `8420` | Port the HTTP server listens on |
-| `VAULT_MCP_PATH` | No | `/` | HTTP path the MCP transport mounts at. Default `/` keeps connector interop (#19) byte-identical. Set to a prefix like `/mcp` to host the server alongside other services on one hostname behind a reverse proxy that can't rewrite paths. **Validated at startup:** must be absolute and must not collide with an auth-exempt route (`/health`, `/oauth/*`, `/.well-known/*`), or the server refuses to start (fail-closed) rather than serve the vault on an unauthenticated path. |
+| `VAULT_MCP_PATH` | No | `/` | HTTP path the MCP transport mounts at. Default `/` keeps connector interop (#19) byte-identical. Set to a prefix like `/mcp` to host the server alongside other services on one hostname behind a reverse proxy that can't rewrite paths. **Validated at startup:** must be absolute and must not collide with an auth-exempt route (`/health`, `/webhooks/*`, `/oauth/*`, `/.well-known/*`), or the server refuses to start (fail-closed) rather than serve the vault on an unauthenticated path. |
 | `VAULT_MCP_ALLOWED_HOSTS` | No | (none) | Comma-separated hostnames allowed through the MCP library's DNS-rebinding protection, **appended** to the loopback defaults (`127.0.0.1`, `localhost`, `[::1]`). Set this to your tunnel/proxy hostname (e.g. `vault-mcp.yourdomain.com`) for any remote deployment, otherwise requests carrying that `Host` are rejected. |
 | `VAULT_MCP_FORWARDED_ALLOW_IPS` | No | `127.0.0.1` | Client IPs uvicorn trusts to set `X-Forwarded-*` headers. Loopback-only by default, because a trusted Cloudflare Tunnel / Caddy proxy connects over localhost. **Never set this to `*`** -- that lets any caller spoof the advertised OAuth origin via `X-Forwarded-Host`. Set to `::1` if your proxy connects over IPv6 loopback. |
 | `VAULT_MCP_PUBLIC_URL` | No | (none) | Canonical public origin (e.g. `https://vault-mcp.yourdomain.com`) for every URL the server advertises -- the OAuth discovery metadata and the `WWW-Authenticate` challenge. When set it **pins** those URLs so a spoofed `Host` / `X-Forwarded-Host` header cannot redirect OAuth discovery to an attacker. When unset, the per-request base URL is used. Recommended for any reverse-proxy deployment. |
@@ -136,6 +136,9 @@ All configuration is via environment variables:
 | `VAULT_MCP_HEARTBEAT_INTERVAL` | No | `60` | Seconds between heartbeat pings. Must be a positive integer; a bad value fails closed at startup. Only used when `VAULT_MCP_HEARTBEAT_URL` is set. |
 | `VAULT_AUDIT_LOG_PATH` | No | (none) | Append-only JSONL audit log of vault mutations. When set, every mutation appends one record; empty disables auditing. The raw bearer token is never written -- only its SHA-256 hash. Must resolve **outside** the vault and be writable; otherwise the server **fails closed** at startup. See [Audit logging](#audit-logging). |
 | `VAULT_AUDIT_LOG_INCLUDE_READS` | No | `false` | Also record read/search operations (`1`/`true`/`yes`/`on`). Off by default; mutations are always logged once the audit log is enabled. |
+| `WEBHOOK_SECRET` | No | (none) | Shared secret for the GitHub push webhook at `POST /webhooks/github`. When set, a signed push to the watched branch triggers `git pull --ff-only` in `VAULT_PATH`. Empty (the default) **disables** the endpoint: it answers `503` and never touches git. This route cannot carry a bearer token, so the HMAC signature is its **only** authentication — use a high-entropy value and set the identical value in the repository's webhook settings. See [GitHub push webhook](#github-push-webhook) and [DEPLOYMENT.md](DEPLOYMENT.md). |
+| `WEBHOOK_BRANCH` | No | `main` | Branch whose pushes trigger a pull. Pushes to any other ref are acknowledged with `200` and ignored. |
+| `WEBHOOK_TIMEOUT` | No | `25` | Hard timeout in seconds on the `git pull` subprocess, clamped to a maximum of `30`. A non-numeric or non-positive value falls back to the default. |
 
 Generate secrets with: `python -c "import secrets; print(secrets.token_hex(32))"`
 
@@ -169,6 +172,49 @@ partial failure is never recorded as a whole-batch success. The unauthenticated 
 endpoint reports only `{"status": "ok", "audit": {"enabled": <bool>}}` — it deliberately does
 not expose the log path or write counters (which would leak host filesystem layout and a
 vault-activity side-channel to anonymous callers over the tunnel).
+
+## GitHub push webhook
+
+When the vault is a git clone of a remote repository, the server's view of it only
+refreshes when something pulls. Set `WEBHOOK_SECRET` and point a GitHub webhook at
+`POST /webhooks/github`, and the server pulls the moment the vault changes upstream
+instead of on a poll interval — useful when notes are written by another machine or by
+an automation that commits through the GitHub API.
+
+Step-by-step setup (including a Railway deployment) is in **[DEPLOYMENT.md](DEPLOYMENT.md)**.
+
+**How a delivery is handled:**
+
+| Condition | Response |
+| --------- | -------- |
+| Valid signature, `push` to `WEBHOOK_BRANCH` | `200 {"status": "pulled", "commits": N}` |
+| Valid signature, any other event or ref | `200 {"status": "skipped", "reason": "..."}` |
+| Valid signature, but `git pull --ff-only` fails | `200 {"status": "failed", "reason": "..."}` |
+| Missing or invalid signature | `401 {"status": "error", "reason": "invalid signature"}` |
+| `WEBHOOK_SECRET` not set | `503 {"status": "error", "reason": "webhook not configured"}` |
+| Any method other than `POST` | `405` |
+
+Handled-but-not-pulled outcomes return `200` deliberately: GitHub retries on non-2xx, and
+a wrong branch or a diverged worktree would fail identically on every retry. The server log
+is the signal — every decision is logged with a `[webhook]` prefix.
+
+**Security model.** GitHub cannot present a bearer token, so this is the one route exempt
+from bearer auth, and the HMAC-SHA256 signature is its *only* credential:
+
+- The signature is verified over the **raw body**, in constant time, **before** the JSON is
+  parsed — a forged payload never reaches a parser.
+- With `WEBHOOK_SECRET` unset the endpoint **fails closed** (`503`) and never runs git.
+- The body is size-capped (2 MB) before it is buffered.
+- The git command is a fixed argv with no shell; nothing from the payload reaches it. The
+  payload only ever decides *whether* to pull.
+- Failure reasons returned to the caller never include git's stderr, which can echo the
+  remote URL (and therefore an embedded token). Full stderr goes to the server log only.
+
+**Pull semantics.** `git pull --ff-only` — a diverged worktree fails loudly rather than
+auto-merging and silently rewriting vault files. Pulling an already-current repo is a clean
+no-op reporting `"commits": 0`, so redelivering a webhook is safe. Concurrent deliveries do
+not queue: while a pull is in flight, another returns `skipped` immediately rather than
+racing over `index.lock`.
 
 ## Connecting to Claude
 
@@ -288,6 +334,7 @@ src/obsidian_vault_mcp/
     serialization.py        # JSON encoder for tool responses (dates, etc.)
     server.py               # FastMCP server setup, tool registration, entry point
     vault.py                # Core filesystem operations (path security, atomic writes)
+    webhook.py              # GitHub push webhook: HMAC verification + git pull --ff-only
     tools/
         manage.py           # list, move, delete tools
         read.py             # read, batch_read tools
@@ -302,6 +349,7 @@ tests/
     test_oauth.py           # OAuth flow, PKCE, and auth-bypass regression tests
     test_tools.py           # Integration tests for tool functions
     test_vault.py           # Path resolution and file operation tests
+    test_webhook.py         # Webhook signature gate, event filtering, real-git pull tests
 scripts/
     setup-tunnel.sh         # Interactive Cloudflare Tunnel setup
     launchd/                # macOS launchd plist templates

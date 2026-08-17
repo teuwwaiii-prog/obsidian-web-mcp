@@ -137,6 +137,50 @@ def validate_heartbeat() -> int | None:
     return interval
 
 
+# GitHub push webhook (see webhook.py). When WEBHOOK_SECRET is set, POST /webhooks/github
+# accepts GitHub push deliveries and runs `git pull --ff-only` in VAULT_PATH, so a vault
+# kept as a git clone refreshes the moment it changes upstream instead of on a poll.
+# Empty (the default) disables the endpoint: it answers 503 and never touches git.
+#
+# The route cannot carry a bearer token (GitHub does not send one), so this shared secret
+# is the ONLY authentication on it -- use a high-entropy value (openssl rand -hex 32) and
+# set the identical value in the repository's webhook settings.
+WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "").strip()
+
+# Branch whose pushes trigger a pull. Pushes to any other ref are acknowledged and ignored.
+WEBHOOK_BRANCH = os.environ.get("WEBHOOK_BRANCH", "main").strip() or "main"
+
+# Hard timeout (seconds) on the `git pull` subprocess, so a hung fetch cannot pin a worker
+# thread forever. Kept as a raw string and parsed in webhook_timeout() so a typo degrades
+# to the default instead of crashing the server at import time.
+WEBHOOK_TIMEOUT = os.environ.get("WEBHOOK_TIMEOUT", "25").strip()
+
+# Ceiling for WEBHOOK_TIMEOUT. GitHub gives a webhook 10s to respond, so a pull that runs
+# much past that has already lost the delivery; 30s is the point where waiting longer only
+# holds a thread without helping anyone.
+WEBHOOK_TIMEOUT_MAX = 30.0
+
+
+def webhook_branch() -> str:
+    """Branch whose pushes trigger a pull, read at call time so tests can patch it."""
+    return WEBHOOK_BRANCH
+
+
+def webhook_timeout() -> float:
+    """Validated `git pull` timeout in seconds, clamped to (0, WEBHOOK_TIMEOUT_MAX].
+
+    Falls back to the 25s default for a non-numeric or non-positive value: an unusable
+    timeout should not stop the vault from syncing, and the clamp bounds the damage.
+    """
+    try:
+        value = float(WEBHOOK_TIMEOUT)
+    except ValueError:
+        value = 25.0
+    if value <= 0:
+        value = 25.0
+    return min(value, WEBHOOK_TIMEOUT_MAX)
+
+
 # Append-only JSONL audit log of vault mutations. When VAULT_AUDIT_LOG_PATH is set,
 # every mutation appends one JSON record (UTC timestamp, SHA-256 hash of the bearer
 # token, operation, target path, size + checksum before and after). Empty (the default)
@@ -207,7 +251,7 @@ def _validate_mcp_path(path: str) -> None:
     # Imported lazily: auth imports config, so a top-level import here would cycle.
     from .auth import _AUTH_EXEMPT_PATHS
 
-    reserved_prefixes = ("/oauth", "/.well-known")
+    reserved_prefixes = ("/oauth", "/.well-known", "/webhooks")
     collides = path in _AUTH_EXEMPT_PATHS or any(
         path == prefix or path.startswith(prefix + "/") for prefix in reserved_prefixes
     )
